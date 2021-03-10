@@ -53,6 +53,10 @@ ConVar hl2_episodic( "hl2_episodic", "0", FCVAR_REPLICATED );
 #include "tf_weaponbase.h"
 #endif // TF_DLL
 
+#ifdef MAPBASE_VSCRIPT
+#include "mapbase/vscript_funcs_shared.h"
+#endif
+
 #include "rumble_shared.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -408,7 +412,11 @@ bool CBaseEntity::KeyValue( const char *szKeyName, const char *szValue )
 		}
 
 		// Do this so inherited classes looking for 'angles' don't have to bother with 'angle'
+#ifdef MAPBASE
+		return KeyValue( "angles", szBuf );
+#else
 		return KeyValue( szKeyName, szBuf );
+#endif
 	}
 
 	// NOTE: Have to do these separate because they set two values instead of one
@@ -435,6 +443,15 @@ bool CBaseEntity::KeyValue( const char *szKeyName, const char *szValue )
 		SetAbsOrigin( vecOrigin );
 		return true;
 	}
+
+#ifdef MAPBASE
+	if ( FStrEq( szKeyName, "eflags" ) )
+	{
+		// Can't use DEFINE_KEYFIELD since eflags might be set before KV are parsed
+		AddEFlags( atoi( szValue ) );
+		return true;
+	}
+#endif
 
 #ifdef GAME_DLL	
 	
@@ -1595,6 +1612,23 @@ typedef CTraceFilterSimpleList CBulletsTraceFilter;
 
 void CBaseEntity::FireBullets( const FireBulletsInfo_t &info )
 {
+#if defined(MAPBASE_VSCRIPT) && defined(GAME_DLL)
+	if (m_ScriptScope.IsInitialized())
+	{
+		HSCRIPT hInfo = g_pScriptVM->RegisterInstance( const_cast<FireBulletsInfo_t*>(&info) );
+
+		ScriptVariant_t functionReturn;
+		ScriptVariant_t args[] = { hInfo };
+		if (g_Hook_FireBullets.Call( m_ScriptScope, &functionReturn, args ))
+		{
+			if (!functionReturn.m_bool)
+				return;
+		}
+
+		g_pScriptVM->RemoveInstance( hInfo );
+	}
+#endif
+
 	static int	tracerCount;
 	trace_t		tr;
 	CAmmoDef*	pAmmoDef	= GetAmmoDef();
@@ -1667,6 +1701,19 @@ void CBaseEntity::FireBullets( const FireBulletsInfo_t &info )
 		traceFilter.AddEntityToIgnore( MyCombatCharacterPointer()->GetVehicleEntity() );
 	}
 #endif // SERVER_DLL
+
+#ifdef MAPBASE
+	if (info.m_pIgnoreEntList != NULL)
+	{
+		for (int i = 0; i < info.m_pIgnoreEntList->Count(); i++)
+		{
+			if (info.m_pIgnoreEntList->Element(i))
+			{
+				traceFilter.AddEntityToIgnore(info.m_pIgnoreEntList->Element(i));
+			}
+		}
+	}
+#endif
 
 	bool bUnderwaterBullets = ShouldDrawUnderwaterBulletBubbles();
 	bool bStartedInWater = false;
@@ -2138,7 +2185,11 @@ void CBaseEntity::TraceAttack( const CTakeDamageInfo &info, const Vector &vecDir
 
 		int blood = BloodColor();
 		
+#if defined(MAPBASE) && defined(GAME_DLL)
+		if ( blood != DONT_BLEED && DamageFilterAllowsBlood( info ) )
+#else
 		if ( blood != DONT_BLEED )
+#endif
 		{
 			SpawnBlood( vecOrigin, vecDir, blood, info.GetDamage() );// a little surface blood.
 			TraceBleed( info.GetDamage(), vecDir, ptr, info.GetDamageType() );
@@ -2367,6 +2418,18 @@ void CBaseEntity::FollowEntity( CBaseEntity *pBaseEntity, bool bBoneMerge )
 	}
 }
 
+#ifdef MAPBASE_VSCRIPT
+void CBaseEntity::ScriptFollowEntity( HSCRIPT hBaseEntity, bool bBoneMerge )
+{
+	FollowEntity( ToEnt( hBaseEntity ), bBoneMerge );
+}
+
+HSCRIPT CBaseEntity::ScriptGetFollowedEntity()
+{
+	return ToHScript( GetFollowedEntity() );
+}
+#endif
+
 void CBaseEntity::SetEffectEntity( CBaseEntity *pEffectEnt )
 {
 	if ( m_hEffectEntity.Get() != pEffectEnt )
@@ -2554,5 +2617,99 @@ bool CBaseEntity::IsToolRecording() const
 #else
 	return false;
 #endif
+}
+#endif
+
+#ifdef MAPBASE_VSCRIPT
+HSCRIPT CBaseEntity::GetOrCreatePrivateScriptScope()
+{
+	ValidateScriptScope();
+	return m_ScriptScope;
+}
+
+//-----------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
+void CBaseEntity::ScriptSetParent(HSCRIPT hParent, const char *szAttachment)
+{
+	CBaseEntity *pParent = ToEnt(hParent);
+	if ( !pParent )
+	{
+		SetParent(NULL);
+		return;
+	}
+
+	// if an attachment is specified, the parent needs to be CBaseAnimating
+	if ( szAttachment && szAttachment[0] != '\0' )
+	{
+		CBaseAnimating *pAnimating = pParent->GetBaseAnimating();
+		if ( !pAnimating )
+		{
+			Warning("ERROR: Tried to set parent for entity %s (%s), but its parent has no model.\n", GetClassname(), GetDebugName());
+			return;
+		}
+		
+		int iAttachment = pAnimating->LookupAttachment(szAttachment);
+		if ( iAttachment <= 0 )
+		{
+			Warning("ERROR: Tried to set parent for entity %s (%s), but it has no attachment named %s.\n", GetClassname(), GetDebugName(), szAttachment);
+			return;
+		}
+
+		SetParent(pParent, iAttachment);
+		SetMoveType(MOVETYPE_NONE);
+		return;
+	}
+	
+	SetParent(pParent);
+}
+
+HSCRIPT	CBaseEntity::GetScriptOwnerEntity()
+{
+	return ToHScript(GetOwnerEntity());
+}
+
+void CBaseEntity::SetScriptOwnerEntity(HSCRIPT pOwner)
+{
+	SetOwnerEntity(ToEnt(pOwner));
+}
+
+//-----------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
+const Vector& CBaseEntity::ScriptGetColorVector()
+{
+	static Vector vecColor;
+	vecColor.Init( m_clrRender.GetR(), m_clrRender.GetG(), m_clrRender.GetB() );
+	return vecColor;
+}
+
+//-----------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
+void CBaseEntity::ScriptSetColorVector( const Vector& vecColor )
+{
+	SetRenderColor( vecColor.x, vecColor.y, vecColor.z );
+}
+
+void CBaseEntity::ScriptSetColor( int r, int g, int b )
+{
+	SetRenderColor( r, g, b );
+}
+
+//-----------------------------------------------------------------------------
+// Vscript: Gets the entity matrix transform
+//-----------------------------------------------------------------------------
+HSCRIPT CBaseEntity::ScriptEntityToWorldTransform( void )
+{
+	return g_pScriptVM->RegisterInstance( &EntityToWorldTransform() );
+}
+
+//-----------------------------------------------------------------------------
+// Vscript: Gets the entity's physics object if it has one
+//-----------------------------------------------------------------------------
+HSCRIPT CBaseEntity::ScriptGetPhysicsObject( void )
+{
+	if (VPhysicsGetObject())
+		return g_pScriptVM->RegisterInstance( VPhysicsGetObject() );
+	else
+		return NULL;
 }
 #endif
